@@ -99,12 +99,12 @@ pytest
 If you use AdaSplash in your research, please cite:
 
 ```
-@article{goncalves2025adasplash,
-  title={AdaSplash: Adaptive Sparse Flash Attention},
-  author={Nuno Gonçalves and Marcos Treviso and André F. T. Martins},
-  journal={arXiv preprint arXiv:2502.12082},
-  url={https://arxiv.org/abs/2502.12082},
-  year={2025}
+@inproceedings{goncalves2025adasplash,
+    title={AdaSplash: Adaptive Sparse Flash Attention},
+    author={Nuno Gon{\c{c}}alves and Marcos V Treviso and Andre Martins},
+    booktitle={Forty-second International Conference on Machine Learning},
+    year={2025},
+    url={https://openreview.net/forum?id=OWIPDWhUcO}
 }
 ```
 
