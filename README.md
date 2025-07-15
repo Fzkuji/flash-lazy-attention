@@ -77,9 +77,12 @@ output = adasplash(q, k, v, is_causal=True)  # Causal masking
 output = adasplash(q, k, v, is_causal=False)  # Non-causal masking
 ```
 
-## Benchmark
+## Benchmarks
 
+Efficiency:
 ![Benchmark](benchmark.png)
+
+For single-vector retrieval experiments, check the [Sparse ModernBERT reop](https://github.com/deep-spin/SparseModernBERT).
 
 
 
