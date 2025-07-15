@@ -79,11 +79,12 @@ output = adasplash(q, k, v, is_causal=False)  # Non-causal masking
 
 ## Benchmarks
 
-Efficiency:
+### Efficiency
 ![Benchmark](benchmark.png)
 
-For single-vector retrieval experiments, check the [Sparse ModernBERT reop](https://github.com/deep-spin/SparseModernBERT).
+### Single-vector retrieval
 
+Check the [Sparse ModernBERT repo](https://github.com/deep-spin/SparseModernBERT).
 
 
 ## Testing
