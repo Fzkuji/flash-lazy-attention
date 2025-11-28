@@ -159,10 +159,11 @@ def _lazy_fwd_kernel_batch(
         tau_term = tau / idx_i
         p_elastic = tl.maximum(p_norm + tau_term[:, None], 0.0)
         
-        V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
-        v = tl.load(V_ptr, mask=offs_n[:, None] < seq_len, other=0.0)
-        
-        acc += tl.dot(p_elastic.to(v.dtype), v)
+        # Dynamic Skip: if all weights are zero, skip V load and accumulation
+        if tl.max(p_elastic) > 0:
+            V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
+            v = tl.load(V_ptr, mask=offs_n[:, None] < seq_len, other=0.0)
+            acc += tl.dot(p_elastic.to(v.dtype), v)
         
     tl.store(Out_ptr, acc.to(Out.dtype.element_ty), mask=offs_m[:, None] < seq_len)
 
@@ -248,12 +249,16 @@ def _lazy_bwd_preprocess_kernel(
         tau_term = tau / idx_i
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
-
-        dp_elastic = tl.dot(do, tl.trans(v))
-
-        term = p_norm * dp_elastic
-        term = tl.where(mask_relu, term, 0.0)
-        delta += tl.sum(term, 1)
+        
+        # Dynamic Skip
+        if tl.max(mask_relu, 1): # Check if any row has active element? No, mask_relu is [M, N]
+            # We need to check if ANY element in the block is active
+            if tl.max(mask_relu):
+                dp_elastic = tl.dot(do, tl.trans(v))
+                
+                term = p_norm * dp_elastic
+                term = tl.where(mask_relu, term, 0.0)
+                delta += tl.sum(term, 1)
 
     tl.store(Delta_ptr, delta, mask=offs_m < seq_len)
 
@@ -341,19 +346,21 @@ def _lazy_bwd_kernel_dq(
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
         
-        dp_elastic = tl.dot(do, tl.trans(v))
-        ds = p_norm * (tl.where(mask_relu, dp_elastic, 0.0) - delta[:, None])
-        
-        dq += tl.dot(ds.to(k.dtype), tl.trans(k)) * sm_scale
-        
-        # dBias
-        dbias_val = tl.where(in_window, ds, 0.0)
-        tl.atomic_add(DBias + h_idx * stride_bh + dist_clamped * stride_bw, dbias_val, mask=valid_mask)
-        
-        # dTau
-        term_tau = dp_elastic * (1.0 / idx_i[:, None])
-        term_tau = tl.where(mask_relu, term_tau, 0.0)
-        dtau_acc += tl.sum(term_tau, 1)
+        # Dynamic Skip
+        if tl.max(mask_relu):
+            dp_elastic = tl.dot(do, tl.trans(v))
+            ds = p_norm * (tl.where(mask_relu, dp_elastic, 0.0) - delta[:, None])
+            
+            dq += tl.dot(ds.to(k.dtype), tl.trans(k)) * sm_scale
+            
+            # dBias
+            dbias_val = tl.where(in_window, ds, 0.0)
+            tl.atomic_add(DBias + h_idx * stride_bh + dist_clamped * stride_bw, dbias_val, mask=valid_mask)
+            
+            # dTau
+            term_tau = dp_elastic * (1.0 / idx_i[:, None])
+            term_tau = tl.where(mask_relu, term_tau, 0.0)
+            dtau_acc += tl.sum(term_tau, 1)
 
     tl.atomic_add(DTau + h_idx, tl.sum(dtau_acc))
     tl.store(DQ_ptr, dq.to(DQ.dtype.element_ty), mask=offs_m[:, None] < seq_len)
@@ -442,12 +449,14 @@ def _lazy_bwd_kernel_dk_dv(
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
         
-        p_elastic = tl.maximum(p_term, 0.0)
-        dv += tl.dot(tl.trans(p_elastic.to(do.dtype)), do)
-        
-        dp_elastic = tl.dot(do, tl.trans(v))
-        ds = p_norm * (tl.where(mask_relu, dp_elastic, 0.0) - delta[:, None])
-        dk += tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
+        # Dynamic Skip
+        if tl.max(mask_relu):
+            p_elastic = tl.maximum(p_term, 0.0)
+            dv += tl.dot(tl.trans(p_elastic.to(do.dtype)), do)
+            
+            dp_elastic = tl.dot(do, tl.trans(v))
+            ds = p_norm * (tl.where(mask_relu, dp_elastic, 0.0) - delta[:, None])
+            dk += tl.dot(tl.trans(ds.to(q.dtype)), q) * sm_scale
         
     tl.store(DK_ptr, dk.to(DK.dtype.element_ty), mask=offs_n[:, None] < seq_len)
     tl.store(DV_ptr, dv.to(DV.dtype.element_ty), mask=offs_n[:, None] < seq_len)
