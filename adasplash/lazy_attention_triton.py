@@ -251,14 +251,12 @@ def _lazy_bwd_preprocess_kernel(
         mask_relu = p_term > 0
         
         # Dynamic Skip
-        if tl.max(mask_relu, 1): # Check if any row has active element? No, mask_relu is [M, N]
-            # We need to check if ANY element in the block is active
-            if tl.max(mask_relu):
-                dp_elastic = tl.dot(do, tl.trans(v))
-                
-                term = p_norm * dp_elastic
-                term = tl.where(mask_relu, term, 0.0)
-                delta += tl.sum(term, 1)
+        if tl.max(mask_relu):
+            dp_elastic = tl.dot(do, tl.trans(v))
+            
+            term = p_norm * dp_elastic
+            term = tl.where(mask_relu, term, 0.0)
+            delta += tl.sum(term, 1)
 
     tl.store(Delta_ptr, delta, mask=offs_m < seq_len)
 
