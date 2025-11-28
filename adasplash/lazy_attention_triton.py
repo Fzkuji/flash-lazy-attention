@@ -48,7 +48,7 @@ def _get_lse_kernel_batch(
         
         # Compute QK^T
         # scaling
-        sm_scale = 1.0 / tl.sqrt(HEAD_DIM.to(tl.float32))
+        sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
         s = tl.dot(q, k) * sm_scale
         
         # Add Distance Bias
@@ -150,7 +150,7 @@ def _lazy_fwd_kernel_batch(
         k = tl.load(K_ptr, mask=offs_n[None, :] < seq_len, other=0.0)
         
         # Score = QK^T
-        sm_scale = 1.0 / tl.sqrt(HEAD_DIM.to(tl.float32))
+        sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
         s = tl.dot(q, k) * sm_scale
         
         # Add Bias (Same logic as Pass 1)
