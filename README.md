@@ -21,7 +21,7 @@ pip install git+https://github.com/deep-spin/adasplash.git
 
 ## Usage
 
-AdaSplash provides three main functions, all available via `from adasplash import ...`:
+AdaSplash provides multiple attention mechanisms, all available via `from adasplash import ...`:
 
 ### **Triton Entmax** (Optimized Entmax Activation)
 ```python
@@ -76,6 +76,67 @@ Causal and Non-causal Masking:
 output = adasplash(q, k, v, is_causal=True)  # Causal masking
 output = adasplash(q, k, v, is_causal=False)  # Non-causal masking
 ```
+
+---
+
+## 🆕 Lazy Attention (Experimental)
+
+**Lazy Attention** implements the attention mechanism with:
+- **Positional Discrimination**: RoPE + learnable head-wise attention biases
+- **Elastic-Softmax**: `ReLU(Softmax + τ/i)` for adaptive sparse attention
+
+### PyTorch Implementation (For Training)
+```python
+from adasplash import LazyAttention
+import torch.nn as nn
+
+class MyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = LazyAttention(
+            dim=512,           # Model dimension
+            num_heads=8,       # Number of attention heads
+            window_size=512,   # Learnable bias window size
+            rope_base=10000    # RoPE base frequency
+        )
+
+    def forward(self, x):
+        # x: [batch, seq_len, dim]
+        return self.attn(x)
+```
+
+### Triton Kernel (For Inference) ⚡
+```python
+from adasplash import lazy_attention_triton
+import torch
+
+# Pre-compute Q, K, V (with RoPE applied)
+q = torch.randn(2, 8, 128, 64, device='cuda')  # [B, H, L, D]
+k = torch.randn(2, 8, 128, 64, device='cuda')
+v = torch.randn(2, 8, 128, 64, device='cuda')
+
+# Learnable parameters from trained model
+bias = torch.randn(8, 513, device='cuda')      # [H, window_size+1]
+tau = torch.full((8,), -1.0, device='cuda')    # [H]
+
+# Fast inference
+output = lazy_attention_triton(q, k, v, bias, tau, window_size=512)
+```
+
+### ⚠️ Current Limitations
+
+| Feature | PyTorch | Triton Kernel |
+|---------|---------|---------------|
+| **Training** | ✅ Yes | ✅ Yes (full backward support) |
+| **Inference** | ✅ Yes | ✅ Yes (2-3x faster) |
+| **Variable Length** | ❌ No | ✅ Yes |
+| **Sparsity Speedup** | ❌ No | ❌ No (no block masking) |
+
+**Recommended Usage:**
+1. **Training**: Use Triton kernel for 2-3x faster training with varlen support
+2. **Inference**: Use Triton kernel for maximum performance
+
+See [ROADMAP.md](ROADMAP.md) for planned improvements and contribution opportunities.
 
 ## Benchmarks
 
