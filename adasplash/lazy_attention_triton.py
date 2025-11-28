@@ -471,15 +471,15 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, bias, tau, lse, varlen = ctx.saved_tensors
         window_size = ctx.window_size
-
-        dq = torch.empty_like(q)
-        dk = torch.empty_like(k)
-        dv = torch.empty_like(v)
+        
+        dq = torch.zeros_like(q)
+        dk = torch.zeros_like(k)
+        dv = torch.zeros_like(v)
         dbias = torch.zeros_like(bias)
         dtau = torch.zeros_like(tau)
-
+        
         _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
-
+        
         return dq, dk, dv, dbias, dtau, None, None
 
 def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=None):
