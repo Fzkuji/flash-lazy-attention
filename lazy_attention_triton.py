@@ -177,7 +177,7 @@ def _lazy_bwd_preprocess_kernel(
     stride_kh, stride_kn, stride_kk,
     stride_vh, stride_vn, stride_vk,
     stride_bh, stride_bw,
-    stride_lseb, stride_dob, stride_om, stride_ok,
+    stride_lseb, stride_dob, stride_doh, stride_om, stride_ok,
     stride_qb, stride_kb, stride_vb, stride_deltab,
     n_heads, seq_len_max, window_size,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
@@ -201,7 +201,7 @@ def _lazy_bwd_preprocess_kernel(
     K_ptr_base = K + b_idx * stride_kb + h_idx * stride_kh
     V_ptr_base = V + b_idx * stride_vb + h_idx * stride_vh
     Bias_ptr_base = Bias + h_idx * stride_bh
-    DO_ptr = DO + b_idx * stride_dob + h_idx * stride_qh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+    DO_ptr = DO + b_idx * stride_dob + h_idx * stride_doh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
     LSE_ptr = LSE + b_idx * stride_lseb + h_idx * seq_len_max + offs_m
     Delta_ptr = Delta + b_idx * stride_deltab + h_idx * seq_len_max + offs_m
     
@@ -265,7 +265,7 @@ def _lazy_bwd_kernel_dq(
     stride_kh, stride_kn, stride_kk,
     stride_vh, stride_vn, stride_vk,
     stride_bh, stride_bw,
-    stride_lseb, stride_dob, stride_om, stride_ok,
+    stride_lseb, stride_dob, stride_doh, stride_om, stride_ok,
     stride_qb, stride_kb, stride_vb, stride_deltab,
     stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     n_heads, seq_len_max, window_size,
@@ -290,7 +290,7 @@ def _lazy_bwd_kernel_dq(
     K_ptr_base = K + b_idx * stride_kb + h_idx * stride_kh
     V_ptr_base = V + b_idx * stride_vb + h_idx * stride_vh
     Bias_ptr_base = Bias + h_idx * stride_bh
-    DO_ptr = DO + b_idx * stride_dob + h_idx * stride_qh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+    DO_ptr = DO + b_idx * stride_dob + h_idx * stride_doh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
     LSE_ptr = LSE + b_idx * stride_lseb + h_idx * seq_len_max + offs_m
     Delta_ptr = Delta + b_idx * stride_deltab + h_idx * seq_len_max + offs_m
     DQ_ptr = DQ + b_idx * stride_dqb + h_idx * stride_dqh + offs_m[:, None] * stride_dqm + offs_k[None, :] * stride_dqk
@@ -366,7 +366,7 @@ def _lazy_bwd_kernel_dk_dv(
     stride_kh, stride_kn, stride_kk,
     stride_vh, stride_vn, stride_vk,
     stride_bh, stride_bw,
-    stride_lseb, stride_dob, stride_om, stride_ok,
+    stride_lseb, stride_dob, stride_doh, stride_om, stride_ok,
     stride_qb, stride_kb, stride_vb, stride_deltab,
     stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_dvb, stride_dvh, stride_dvn, stride_dvk,
@@ -407,7 +407,7 @@ def _lazy_bwd_kernel_dk_dv(
         offs_m = m_block * BLOCK_M + tl.arange(0, BLOCK_M)
         
         Q_ptr = Q + b_idx * stride_qb + h_idx * stride_qh + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
-        DO_ptr = DO + b_idx * stride_dob + h_idx * stride_qh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
+        DO_ptr = DO + b_idx * stride_dob + h_idx * stride_doh + offs_m[:, None] * stride_om + offs_k[None, :] * stride_ok
         LSE_ptr = LSE + b_idx * stride_lseb + h_idx * seq_len_max + offs_m
         Delta_ptr = Delta + b_idx * stride_deltab + h_idx * seq_len_max + offs_m
         Bias_ptr_base = Bias + h_idx * stride_bh
@@ -546,7 +546,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         k.stride(1), k.stride(2), k.stride(3),
         v.stride(1), v.stride(2), v.stride(3),
         bias.stride(0), bias.stride(1),
-        lse.stride(0), do.stride(0), do.stride(2), do.stride(3),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
         H, L, window_size,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
@@ -560,7 +560,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         k.stride(1), k.stride(2), k.stride(3),
         v.stride(1), v.stride(2), v.stride(3),
         bias.stride(0), bias.stride(1),
-        lse.stride(0), do.stride(0), do.stride(2), do.stride(3),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
         dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
         H, L, window_size,
@@ -577,7 +577,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         k.stride(1), k.stride(2), k.stride(3),
         v.stride(1), v.stride(2), v.stride(3),
         bias.stride(0), bias.stride(1),
-        lse.stride(0), do.stride(0), do.stride(2), do.stride(3),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
         dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
         dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
