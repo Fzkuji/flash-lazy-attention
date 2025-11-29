@@ -110,10 +110,10 @@ def test_debug_kernel():
     print("Debug Kernel Values Test")
     print("="*80)
 
-    B, H, L, D = 1, 4, 8, 16
+    B, H, L, D = 1, 4, 32, 16  # Increased L to 32 for larger blocks
     window_size = 16
-    BLOCK_M = 8
-    BLOCK_N = 8
+    BLOCK_M = 16  # Must be ≥16 for tl.dot
+    BLOCK_N = 16  # Must be ≥16 for tl.dot
 
     # Create test inputs
     q = torch.randn(B, H, L, D, device='cuda')
