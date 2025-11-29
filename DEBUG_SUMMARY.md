@@ -29,10 +29,15 @@ All heads should receive non-zero gradients for both `bias` and `tau`.
   - 1D indexing: `DTau + h_idx` ✅
 - **Conclusion**: Atomic operations with head-based indexing work correctly
 
-### ⏳ Test 3: Minimal backward kernel (PENDING)
+### ⏳ Test 3: Minimal backward kernel (READY TO RUN)
 - **File**: `test_minimal_backward.py`
-- **Status**: Syntax error fixed, awaiting results
-- **Purpose**: Test simplified backward logic to isolate the issue
+- **Status**: All syntax errors fixed, ready for testing
+- **Purpose**: Test simplified backward logic with grid parallelization (H, L)
+- **What it tests**:
+  - Each (h_idx, l_idx) thread adds gradients via atomic_add
+  - Grid: (H=4, L=8) - 32 total threads
+  - Expected: All 4 heads should have non-zero dbias and dtau
+- **Run with**: `git pull && python test_minimal_backward.py`
 
 ## Key Code Locations
 
