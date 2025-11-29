@@ -456,7 +456,10 @@ def _lazy_bwd_kernel_dk_dv(
 # Python Wrapper
 # ==========================================
 
-def lazy_attention_triton(q, k, v, bias, tau, window_size=512, varlen=None):
+def lazy_attention_triton(q, k, v, bias, tau, window_size=None, varlen=None):
+    # Auto-infer window_size from bias shape if not provided
+    if window_size is None:
+        window_size = bias.shape[1]
     return LazyAttentionTritonFunc.apply(q, k, v, bias, tau, window_size, varlen)
 
 class LazyAttentionTritonFunc(torch.autograd.Function):
