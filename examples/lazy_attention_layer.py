@@ -84,7 +84,8 @@ class LazyAttentionLayer(nn.Module):
         # Learnable head-wise attention biases [H, max_bias_length]
         self.bias = nn.Parameter(torch.zeros(self.num_heads, self.max_bias_length))
         # Learnable sparsity parameter [H]
-        self.tau = nn.Parameter(torch.full((self.num_heads,), -1.0))
+        # Use float32 to avoid gradient underflow with bfloat16 training
+        self.tau = nn.Parameter(torch.full((self.num_heads,), -1.0, dtype=torch.float32))
 
     def forward(
         self,
@@ -158,10 +159,11 @@ class LazyAttentionLayer(nn.Module):
             varlen = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
 
         # === Call Lazy Attention Triton kernel ===
+        # Convert tau from float32 to model dtype for kernel computation
         o = lazy_attention_triton(
             q, k, v,
             bias=self.bias,
-            tau=self.tau,
+            tau=self.tau.to(q.dtype),
             window_size=self.max_bias_length,
             varlen=varlen
         )
