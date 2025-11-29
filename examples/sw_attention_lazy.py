@@ -102,7 +102,8 @@ class SWAttention(nn.Module):
 
         # ========== 关键修改 3: Lazy Attention 的可学习参数 ==========
         # 每个 head 的位置 bias: [num_heads, max_bias_length]
-        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.max_bias_length))
+        # Use float32 to avoid gradient underflow with bfloat16 training
+        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.max_bias_length, dtype=torch.float32))
 
         # 每个 head 的稀疏性参数: [num_heads]
         # Use float32 to avoid gradient underflow with bfloat16 training
@@ -173,10 +174,10 @@ class SWAttention(nn.Module):
                 varlen = attention_mask.sum(dim=1).to(torch.int32)
 
         # ========== 关键修改 7: 调用 Lazy Attention ==========
-        # Convert tau from float32 to model dtype for kernel computation
+        # Convert float32 parameters to model dtype for kernel computation
         attn_output = lazy_attention_triton(
             q, k, v,
-            bias=self.bias,
+            bias=self.bias.to(q.dtype),
             tau=self.tau.to(q.dtype),
             window_size=self.max_bias_length,
             varlen=varlen
