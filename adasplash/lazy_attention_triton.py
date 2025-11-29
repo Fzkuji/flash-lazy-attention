@@ -351,8 +351,10 @@ def _lazy_bwd_kernel_dq(
         tl.atomic_add(DBias + h_idx * stride_bh + dist_clamped * stride_bw, dbias_val, mask=valid_mask)
 
         # dTau
+        # NOTE: 不使用 mask_relu 屏蔽 tau 梯度，即使 p_term <= 0 也保留梯度
+        # 这样可以让 tau 从很负的值（如 -1）逐渐训练到合适的值
         term_tau = dp_elastic * (1.0 / idx_i[:, None])
-        term_tau = tl.where(mask_relu, term_tau, 0.0)
+        # term_tau = tl.where(mask_relu, term_tau, 0.0)  # 移除这一行！
         dtau_acc += tl.sum(term_tau, 1)
 
     tl.atomic_add(DTau + h_idx, tl.sum(dtau_acc))
