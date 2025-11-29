@@ -29,15 +29,17 @@ All heads should receive non-zero gradients for both `bias` and `tau`.
   - 1D indexing: `DTau + h_idx` ✅
 - **Conclusion**: Atomic operations with head-based indexing work correctly
 
-### ⏳ Test 3: Minimal backward kernel (READY TO RUN)
+### ✅ Test 3: Minimal backward kernel (PASSED)
 - **File**: `test_minimal_backward.py`
-- **Status**: All syntax errors fixed, ready for testing
-- **Purpose**: Test simplified backward logic with grid parallelization (H, L)
-- **What it tests**:
-  - Each (h_idx, l_idx) thread adds gradients via atomic_add
-  - Grid: (H=4, L=8) - 32 total threads
-  - Expected: All 4 heads should have non-zero dbias and dtau
-- **Run with**: `git pull && python test_minimal_backward.py`
+- **Result**: All heads successfully compute gradients via atomic_add
+- **Output**:
+  ```
+  Head 0: dbias_sum=36.0000, dtau=0.8000 ✅
+  Head 1: dbias_sum=36.0000, dtau=0.8000 ✅
+  Head 2: dbias_sum=36.0000, dtau=0.8000 ✅
+  Head 3: dbias_sum=36.0000, dtau=0.8000 ✅
+  ```
+- **Conclusion**: Grid parallelization (H, L) works correctly. The bug is NOT in grid config or basic atomic operations.
 
 ## Key Code Locations
 
@@ -66,39 +68,58 @@ Computes `delta` for use in main backward pass. Uses same grid configuration.
 
 ## Hypotheses
 
-### ❌ Ruled Out
-1. **Atomic add bug**: Tests 1 & 2 prove atomic_add works
-2. **Stride calculation error**: Test 2 shows stride-based indexing works
-3. **Grid configuration**: Grid `(triton.cdiv(L, BLOCK_M), H, B)` is correct
-4. **Float32 precision**: Not the root cause (as user noted)
+### ❌ Ruled Out (via Tests 1, 2, 3)
+1. **Atomic add bug**: Tests 1, 2, 3 all prove atomic_add works ✅
+2. **Stride calculation error**: Test 2 shows stride-based indexing works ✅
+3. **Grid configuration**: Test 3 proves grid `(H, L)` parallelization works ✅
+4. **Float32 precision**: Not the root cause (as user noted) ✅
+5. **Basic h_idx access**: Test 3 shows `tl.program_id(1)` correctly returns 0,1,2,3 ✅
 
-### 🔍 Still Investigating
-1. **mask_relu zeroing gradients**: Line 342-355
-   - `mask_relu = p_term > 0` might be True only for h_idx=0
-   - This would zero out `dbias_val` and `term_tau` for other heads
+### 🔍 MUST INVESTIGATE (Bug is in actual kernel computation logic)
 
-2. **LSE/Delta values**: Lines 299-300, 338-345
-   - If `lse` or `delta` are incorrect for h_idx>0, gradients would be wrong
-   - Check if preprocess kernel computes delta correctly for all heads
+Since all basic infrastructure works, the bug MUST be in the backward kernel's computation:
 
-3. **Causal mask logic**: Lines 322-332
-   - `dist = offs_m[:, None] - offs_n[None, :]`
-   - `in_window = (dist >= 0) & (dist < window_size)`
-   - Might have head-dependent issues
+**Priority 1: mask_relu logic** (lazy_attention_triton.py:342-355)
+```python
+mask_relu = p_term > 0  # Line 342
+dbias_val = tl.where(mask_relu, ds, 0.0)  # Line 351
+term_tau = tl.where(mask_relu, term_tau, 0.0)  # Line 354
+```
+- **Hypothesis**: `mask_relu` might be False for all positions when h_idx>0
+- **Why**: This would zero out ALL gradients for heads 1,2,3
+- **Check**: Print `mask_relu.sum()` and `p_term` for each head
 
-4. **Data dependencies**:
-   - Check if `q`, `k`, `v`, `bias`, `tau` are loaded correctly for all heads
-   - Verify forward pass produces valid outputs for all heads
+**Priority 2: LSE/Delta values** (Lines 299-300, 338-345)
+```python
+lse = tl.load(LSE + lse_offset)  # Line 299
+delta = tl.load(Delta + delta_offset)  # Line 300
+```
+- **Hypothesis**: Preprocess kernel might not compute delta correctly for h_idx>0
+- **Check**: Print `lse` and `delta` values for each head
+
+**Priority 3: Attention scores** (Lines 315-340)
+- `p = tl.math.exp2(qk - lse[:, None])` might be wrong for h_idx>0
+- Check if `qk` (attention scores) are computed correctly for all heads
+
+**Priority 4: Data loading** (Lines 292-297, 303-312)
+- Verify `q`, `k`, `v`, `bias`, `tau` load correctly for all heads
+- Check offset calculations for h_idx>0
 
 ## Next Steps
 
-1. ✅ Run `test_minimal_backward.py` to verify simplified logic
-2. Add debug prints inside actual backward kernel to check:
-   - `h_idx` values being executed
-   - `mask_relu` distribution across heads
-   - `dbias_val` and `dtau_acc` values before atomic_add
-3. Compare preprocess kernel delta values across heads
-4. Verify forward kernel produces correct outputs for all heads
+1. ✅ DONE: Run `test_minimal_backward.py` - PASSED for all heads
+2. **CRITICAL - Add debug instrumentation to backward kernel**:
+   - Create `test_backward_debug.py` to add tl.device_print to actual kernel
+   - Check these values for each head (h_idx=0,1,2,3):
+     - `mask_relu.sum()` - How many positions pass ReLU?
+     - `p_term.min(), p_term.max()` - What are the elastic softmax values?
+     - `dbias_val` before atomic_add - Are gradients computed?
+     - `dtau_acc` before atomic_add - Are tau gradients computed?
+3. **Check preprocess kernel**:
+   - Verify `delta` computation works for all heads
+   - Compare `lse` values across heads
+4. **Isolate the specific line**:
+   - Once we know which value is wrong for h_idx>0, trace back to find the bug
 
 ## Files Modified
 - `c:\Users\fzkuj\Projects\adasplash\lazy_attention_triton.py` - Main kernel file
