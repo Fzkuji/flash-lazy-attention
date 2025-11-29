@@ -122,11 +122,6 @@ def _lazy_fwd_kernel_batch(
     
     lse = tl.load(LSE_ptr, mask=offs_m < seq_len, other=0.0)
     tau = tl.load(Tau + h_idx)
-    
-    # DEBUG PRINT
-    if b_idx == 0 and m_block_idx == 0:
-        tl.device_print("DEBUG: h_idx", h_idx)
-        tl.device_print("DEBUG: tau_val", tau)
 
     q = tl.load(Q_ptr, mask=offs_m[:, None] < seq_len, other=0.0)
     
