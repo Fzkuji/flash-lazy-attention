@@ -122,6 +122,12 @@ def _lazy_fwd_kernel_batch(
     
     lse = tl.load(LSE_ptr, mask=offs_m < seq_len, other=0.0)
     tau = tl.load(Tau + h_idx)
+    
+    # DEBUG PRINT
+    if b_idx == 0 and m_block_idx == 0:
+        tl.device_print("DEBUG: h_idx", h_idx)
+        tl.device_print("DEBUG: tau_val", tau)
+
     q = tl.load(Q_ptr, mask=offs_m[:, None] < seq_len, other=0.0)
     
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
@@ -474,8 +480,9 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
-        dbias = torch.zeros_like(bias)
-        dtau = torch.zeros_like(tau)
+        # Force float32 for gradient accumulation of bias and tau
+        dbias = torch.zeros_like(bias, dtype=torch.float32)
+        dtau = torch.zeros_like(tau, dtype=torch.float32)
         
         _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
         
