@@ -7,7 +7,7 @@ import triton.language as tl
 @triton.jit
 def minimal_bwd_kernel(
     DBias,  # [H, W] - output
-    DT au,  # [H] - output
+    DTau,  # [H] - output
     DO,  # [B, H, L, D] - input gradient
     V,  # [B, H, L, D] - input
     stride_doh, stride_dol, stride_dod,
