@@ -59,9 +59,9 @@ def _get_lse_kernel_batch(
         s = tl.dot(q, k) * sm_scale
         
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist <= window_size)
-        
-        dist_clamped = tl.minimum(dist, window_size)
+        in_window = (dist >= 0) & (dist < window_size)
+
+        dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
         
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -140,9 +140,9 @@ def _lazy_fwd_kernel_batch(
         s = tl.dot(q, k) * sm_scale
         
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist <= window_size)
+        in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size)
+        dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
         
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -227,9 +227,9 @@ def _lazy_bwd_preprocess_kernel(
         s = tl.dot(q, k) * sm_scale
         
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist <= window_size)
+        in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size)
+        dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
         
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -319,9 +319,9 @@ def _lazy_bwd_kernel_dq(
         s = tl.dot(q, k) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist <= window_size)
+        in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size)
+        dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -420,9 +420,9 @@ def _lazy_bwd_kernel_dk_dv(
         s = tl.dot(q, tl.trans(k)) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist <= window_size)
+        in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size)
+        dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw

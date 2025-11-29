@@ -116,7 +116,7 @@ k = torch.randn(2, 8, 128, 64, device='cuda')
 v = torch.randn(2, 8, 128, 64, device='cuda')
 
 # Learnable parameters from trained model
-bias = torch.randn(8, 513, device='cuda')      # [H, window_size+1]
+bias = torch.randn(8, 512, device='cuda')      # [H, window_size]
 tau = torch.full((8,), -1.0, device='cuda')    # [H]
 
 # Fast inference

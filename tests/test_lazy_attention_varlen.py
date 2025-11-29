@@ -143,7 +143,7 @@ def test_varlen_backward():
     q = torch.randn(B, H, L, D, device='cuda', requires_grad=True)
     k = torch.randn(B, H, L, D, device='cuda', requires_grad=True)
     v = torch.randn(B, H, L, D, device='cuda', requires_grad=True)
-    bias = torch.randn(H, window_size + 1, device='cuda', requires_grad=True)
+    bias = torch.randn(H, window_size, device='cuda', requires_grad=True)
     tau = torch.full((H,), -1.0, device='cuda', requires_grad=True)
 
     varlen = torch.tensor([32, 48], device='cuda', dtype=torch.int32)
