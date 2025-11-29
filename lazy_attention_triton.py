@@ -122,11 +122,6 @@ def _lazy_fwd_kernel_batch(
     
     lse = tl.load(LSE_ptr, mask=offs_m < seq_len, other=0.0)
     tau = tl.load(Tau + h_idx)
-    
-    # DEBUG PRINT
-    if b_idx == 0 and m_block_idx == 0:
-        tl.device_print("DEBUG: h_idx", h_idx)
-        tl.device_print("DEBUG: tau_val", tau)
 
     q = tl.load(Q_ptr, mask=offs_m[:, None] < seq_len, other=0.0)
     
@@ -353,26 +348,12 @@ def _lazy_bwd_kernel_dq(
 
         # dBias
         dbias_val = tl.where(in_window, ds, 0.0)
-
-        # Debug: print dbias_val sum for first block
-        if b_idx == 0 and m_block_idx == 0 and n_start == 0:
-            tl.device_print("BWD h_idx dbias:", h_idx)
-            tl.device_print("BWD dbias_sum:", tl.sum(dbias_val))
-            tl.device_print("BWD ds_sum:", tl.sum(ds))
-            tl.device_print("BWD mask_relu_sum:", tl.sum(tl.where(mask_relu, 1.0, 0.0)))
-
         tl.atomic_add(DBias + h_idx * stride_bh + dist_clamped * stride_bw, dbias_val, mask=valid_mask)
 
         # dTau
         term_tau = dp_elastic * (1.0 / idx_i[:, None])
         term_tau = tl.where(mask_relu, term_tau, 0.0)
         dtau_acc += tl.sum(term_tau, 1)
-
-    # Debug prints
-    if b_idx == 0 and m_block_idx == 0:
-        tl.device_print("BWD h_idx:", h_idx)
-        tl.device_print("BWD dtau_sum:", tl.sum(dtau_acc))
-        tl.device_print("BWD stride_bh:", stride_bh)
 
     tl.atomic_add(DTau + h_idx, tl.sum(dtau_acc))
     tl.store(DQ_ptr, dq.to(DQ.dtype.element_ty), mask=offs_m[:, None] < seq_len)
@@ -490,16 +471,16 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, bias, tau, lse, varlen = ctx.saved_tensors
         window_size = ctx.window_size
-        
+
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
-        # Force float32 for gradient accumulation of bias and tau
-        dbias = torch.zeros_like(bias, dtype=torch.float32)
-        dtau = torch.zeros_like(tau, dtype=torch.float32)
-        
+        # Keep same dtype as bias/tau to avoid any dtype mismatch issues
+        dbias = torch.zeros_like(bias)
+        dtau = torch.zeros_like(tau)
+
         _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
-        
+
         return dq, dk, dv, dbias, dtau, None, None
 
 def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=None):
