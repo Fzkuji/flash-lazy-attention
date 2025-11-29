@@ -8,50 +8,20 @@ import triton.language as tl
 def minimal_bwd_kernel(
     DBias,  # [H, W] - output
     DTau,  # [H] - output
-    DO,  # [B, H, L, D] - input gradient
-    V,  # [B, H, L, D] - input
-    stride_doh, stride_dol, stride_dod,
-    stride_vh, stride_vl, stride_vd,
     stride_bh, stride_bw,
-    stride_dob, stride_vb,
-    B: tl.constexpr,
     H: tl.constexpr,
-    L: tl.constexpr,
-    D: tl.constexpr,
-    W: tl.constexpr,
-    BLOCK: tl.constexpr
+    W: tl.constexpr
 ):
-    """Simplified backward kernel - just accumulate gradients"""
+    """Ultra-simplified kernel - just test atomic_add with grid parallelization"""
     h_idx = tl.program_id(0)
-    b_idx = tl.program_id(1)
+    l_idx = tl.program_id(1)  # Simulate sequence position
 
-    # Load a block of DO and V
-    offs_l = tl.arange(0, BLOCK)
-    offs_d = tl.arange(0, D)
+    # Simple pattern: each (h, l) thread adds 1.0 to different bias positions
+    for w in range(min(W, l_idx + 1)):  # Add to positions 0..min(W, l_idx)
+        tl.atomic_add(DBias + h_idx * stride_bh + w * stride_bw, 1.0)
 
-    DO_ptr = DO + b_idx * stride_dob + h_idx * stride_doh + offs_l[:, None] * stride_dol + offs_d[None, :] * stride_dod
-    V_ptr = V + b_idx * stride_vb + h_idx * stride_vh + offs_l[:, None] * stride_vl + offs_d[None, :] * stride_vd
-
-    mask = offs_l[:, None] < L
-    do_block = tl.load(DO_ptr, mask=mask, other=0.0)
-    v_block = tl.load(V_ptr, mask=mask, other=0.0)
-
-    # Compute gradient (simplified)
-    dp = tl.dot(do_block, tl.trans(v_block))  # [BLOCK, BLOCK]
-
-    # dBias: accumulate to different positions based on distance
-    for i in range(BLOCK):
-        if offs_l[i] < L:
-            for j in range(BLOCK):
-                if offs_l[j] < L and offs_l[i] >= offs_l[j]:
-                    dist = offs_l[i] - offs_l[j]
-                    if dist < W:
-                        val = dp[i, j]
-                        tl.atomic_add(DBias + h_idx * stride_bh + dist * stride_bw, val)
-
-    # dTau: simple sum
-    dtau_val = tl.sum(dp)
-    tl.atomic_add(DTau + h_idx, dtau_val)
+    # Each thread adds 0.1 to its head's tau
+    tl.atomic_add(DTau + h_idx, 0.1)
 
 
 def test_minimal_backward():
@@ -60,34 +30,23 @@ def test_minimal_backward():
     print("Testing Minimal Backward Kernel")
     print("="*80)
 
-    B, H, L, D, W = 1, 4, 8, 16, 16
-    BLOCK = 8
-
-    # Create inputs
-    do = torch.randn(B, H, L, D, device='cuda')
-    v = torch.randn(B, H, L, D, device='cuda')
+    H, L, W = 4, 8, 16
 
     # Create outputs
     dbias = torch.zeros(H, W, device='cuda')
     dtau = torch.zeros(H, device='cuda')
 
-    print(f"\nInput shapes:")
-    print(f"  do: {do.shape}")
-    print(f"  v: {v.shape}")
+    print(f"\nOutput shapes:")
     print(f"  dbias: {dbias.shape}")
     print(f"  dtau: {dtau.shape}")
 
-    # Launch kernel
-    grid = (H, B)
+    # Launch kernel with grid (H, L) to simulate backward pass parallelization
+    # Each (h_idx, l_idx) thread will add gradients
+    grid = (H, L)
     minimal_bwd_kernel[grid](
         dbias, dtau,
-        do, v,
-        do.stride(1), do.stride(2), do.stride(3),
-        v.stride(1), v.stride(2), v.stride(3),
         dbias.stride(0), dbias.stride(1),
-        do.stride(0), v.stride(0),
-        B=B, H=H, L=L, D=D, W=W,
-        BLOCK=BLOCK
+        H=H, W=W
     )
 
     # Check results
