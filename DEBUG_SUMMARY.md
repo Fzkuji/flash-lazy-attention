@@ -157,3 +157,54 @@ The root cause is earlier in the pipeline (LSE, bias, or data loading).
 - PyTorch version: (check with `pip show torch`)
 - CUDA version: (check with `nvidia-smi`)
 - Test configuration: B=1, H=4, L=8, D=16, window_size=16
+
+---
+
+## ✅ PROBLEM SOLVED! (Updated)
+
+**Root Cause Found:** Was editing the WRONG file!
+
+### The Issue:
+- Initially fixed `lazy_attention_triton.py` in root directory ❌
+- But Python imports from `adasplash/lazy_attention_triton.py` package directory ✓
+- The package file was NEVER fixed until now!
+
+### Solution Applied:
+Applied all fixes to the CORRECT file: **`adasplash/lazy_attention_triton.py`**
+
+1. ✅ Added `stride_doh` parameter to all 3 kernels (lines 185, 273, 374)
+2. ✅ Updated DO_ptr to use `stride_doh` instead of `stride_qh` (lines 209, 298, 415)
+3. ✅ Updated all 3 kernel calls to pass `do.stride(1)` (lines 554, 568, 585)
+
+### The Bug Explained:
+```python
+# WRONG (before):
+DO_ptr = DO + b_idx * stride_dob + h_idx * stride_qh + ...
+# Using Q's head stride for DO tensor!
+
+# CORRECT (after):
+DO_ptr = DO + b_idx * stride_dob + h_idx * stride_doh + ...
+# Using DO's own head stride
+```
+
+This caused h_idx>0 to access wrong memory addresses, resulting in:
+- ✅ Head 0: All gradients correct (bias, tau, dq, dk, dv)
+- ❌ Head 1-3: All gradients zero
+
+### Commits:
+```
+commit 9920944 - Fix multi-head gradient bug in backward kernels
+commit 1e4271b - Add bug fix documentation
+```
+
+### Test Instructions:
+```bash
+cd c:/Users/fzkuj/Projects/adasplash
+git pull
+rm -rf ~/.triton/cache
+python test_head_gradients.py
+```
+
+**Expected Result:** All 4 heads should now have non-zero gradients! ✅
+
+See [BUG_FIXED.md](BUG_FIXED.md) for complete details.
