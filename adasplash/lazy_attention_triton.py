@@ -157,7 +157,8 @@ def _lazy_fwd_kernel_batch(
         
         p_norm = tl.exp(s - lse[:, None])
         idx_i = offs_m + 1
-        tau_term = tau / idx_i
+        idx_i_float = idx_i.to(tl.float32)
+        tau_term = tau / idx_i_float
         p_elastic = tl.maximum(p_norm + tau_term[:, None], 0.0)
 
         V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
@@ -245,7 +246,8 @@ def _lazy_bwd_preprocess_kernel(
 
         p_norm = tl.exp(s - lse[:, None])
         idx_i = offs_m + 1
-        tau_term = tau / idx_i
+        idx_i_float = idx_i.to(tl.float32)
+        tau_term = tau / idx_i_float
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
 
@@ -337,7 +339,8 @@ def _lazy_bwd_kernel_dq(
 
         p_norm = tl.exp(s - lse[:, None])
         idx_i = offs_m + 1
-        tau_term = tau / idx_i
+        idx_i_float = idx_i.to(tl.float32)
+        tau_term = tau / idx_i_float
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
 
@@ -351,7 +354,7 @@ def _lazy_bwd_kernel_dq(
         tl.atomic_add(DBias + h_idx * stride_bh + dist_clamped * stride_bw, dbias_val, mask=valid_mask)
 
         # dTau
-        term_tau = dp_elastic * (1.0 / idx_i[:, None])
+        term_tau = dp_elastic * (1.0 / idx_i_float[:, None])
         term_tau = tl.where(mask_relu, term_tau, 0.0)
         dtau_acc += tl.sum(term_tau, 1)
 
@@ -438,7 +441,8 @@ def _lazy_bwd_kernel_dk_dv(
 
         p_norm = tl.exp(s - lse[:, None])
         idx_i = offs_m + 1
-        tau_term = tau / idx_i
+        idx_i_float = idx_i.to(tl.float32)
+        tau_term = tau / idx_i_float
         p_term = p_norm + tau_term[:, None]
         mask_relu = p_term > 0
 
