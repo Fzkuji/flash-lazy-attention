@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """Check if we're importing the correct version with the fix"""
 import inspect
-import adasplash.lazy_attention_triton as lat
+import sys
+
+# Import the module (not the function)
+import adasplash.lazy_attention_triton
 
 print("="*80)
 print("Import Path Check")
 print("="*80)
 
 # Check where the module is imported from
+lat_module = sys.modules['adasplash.lazy_attention_triton']
 print(f"\nModule file location:")
-print(f"  {lat.__file__}")
+print(f"  {lat_module.__file__}")
 
 # Check if the fix is present by inspecting the function signature
 print(f"\nChecking if stride_doh fix is present...")
 
 # Get the source code of _lazy_bwd_kernel_dq
 try:
-    source = inspect.getsource(lat._lazy_bwd_kernel_dq)
+    source = inspect.getsource(adasplash.lazy_attention_triton._lazy_bwd_kernel_dq)
     if 'stride_doh' in source:
         print("  ✅ stride_doh FOUND in _lazy_bwd_kernel_dq source!")
     else:
@@ -29,7 +33,7 @@ except Exception as e:
 # Alternative check: look at the backward function
 print(f"\nChecking _lazy_attention_backward function...")
 try:
-    source = inspect.getsource(lat._lazy_attention_backward)
+    source = inspect.getsource(adasplash.lazy_attention_triton._lazy_attention_backward)
     # Check if do.stride(1) is passed in the kernel calls
     if 'do.stride(1)' in source:
         print("  ✅ do.stride(1) FOUND in kernel calls!")
