@@ -41,6 +41,26 @@ All heads should receive non-zero gradients for both `bias` and `tau`.
   ```
 - **Conclusion**: Grid parallelization (H, L) works correctly. The bug is NOT in grid config or basic atomic operations.
 
+### 🔍 Test 4: mask_relu hypothesis (CRITICAL FINDING)
+- **File**: `test_mask_relu_hypothesis.py`
+- **Result**: **Bug persists even with tau=0!**
+- **Key Finding**: The problem is NOT caused by tau's negative value
+- **Evidence**: With tau=0, only Head 0 still has gradients
+- **Debug output**: h_idx and tau load correctly for all heads, but gradients still zero for h_idx>0
+- **Conclusion**: Problem must be in data loading (q,k,v,bias,lse) or computation logic, not tau
+
+### ⏳ Test 5: Detailed kernel value debugging (READY TO RUN)
+- **File**: `test_kernel_values_debug.py`
+- **Purpose**: Print intermediate values for each head to find divergence point
+- **What it checks**:
+  - Data loading: q_sum, k_sum for each head
+  - LSE values: lse_mean for each head
+  - Bias loading: bias_mean for each head
+  - Attention scores: s_mean before/after bias
+  - p_norm values: p_norm_mean
+  - mask_relu: count of True values, p_term min/max
+- **Run with**: `git pull && python test_kernel_values_debug.py`
+
 ## Key Code Locations
 
 ### Backward Kernel (lazy_attention_triton.py)
@@ -68,58 +88,62 @@ Computes `delta` for use in main backward pass. Uses same grid configuration.
 
 ## Hypotheses
 
-### ❌ Ruled Out (via Tests 1, 2, 3)
+### ❌ Ruled Out (via Tests 1-4)
 1. **Atomic add bug**: Tests 1, 2, 3 all prove atomic_add works ✅
 2. **Stride calculation error**: Test 2 shows stride-based indexing works ✅
 3. **Grid configuration**: Test 3 proves grid `(H, L)` parallelization works ✅
 4. **Float32 precision**: Not the root cause (as user noted) ✅
 5. **Basic h_idx access**: Test 3 shows `tl.program_id(1)` correctly returns 0,1,2,3 ✅
+6. **Tau negative value**: Test 4 shows bug persists even with tau=0 ✅
+7. **Tau loading**: Test 4 debug shows tau loads correctly for all heads ✅
 
-### 🔍 MUST INVESTIGATE (Bug is in actual kernel computation logic)
+### 🔍 MUST INVESTIGATE (Narrowed down after Test 4)
 
-Since all basic infrastructure works, the bug MUST be in the backward kernel's computation:
+**Since tau is NOT the issue, the bug MUST be in one of these areas:**
 
-**Priority 1: mask_relu logic** (lazy_attention_triton.py:342-355)
-```python
-mask_relu = p_term > 0  # Line 342
-dbias_val = tl.where(mask_relu, ds, 0.0)  # Line 351
-term_tau = tl.where(mask_relu, term_tau, 0.0)  # Line 354
-```
-- **Hypothesis**: `mask_relu` might be False for all positions when h_idx>0
-- **Why**: This would zero out ALL gradients for heads 1,2,3
-- **Check**: Print `mask_relu.sum()` and `p_term` for each head
+**Priority 1: LSE computation/loading** (MOST LIKELY)
+- LSE is computed in forward pass, loaded in backward
+- Forward: line 38: `LSE_ptr = LSE + b_idx * stride_lseb + h_idx * seq_len_max + offs_m`
+- Backward: line 294: `LSE_ptr = LSE + b_idx * stride_lseb + h_idx * seq_len_max + offs_m`
+- **Hypothesis**: LSE might be computed/stored incorrectly for h_idx>0
+- **Impact**: Wrong LSE → wrong p_norm → wrong mask_relu → zero gradients
+- **Check**: Compare LSE values across heads in Test 5
 
-**Priority 2: LSE/Delta values** (Lines 299-300, 338-345)
-```python
-lse = tl.load(LSE + lse_offset)  # Line 299
-delta = tl.load(Delta + delta_offset)  # Line 300
-```
-- **Hypothesis**: Preprocess kernel might not compute delta correctly for h_idx>0
-- **Check**: Print `lse` and `delta` values for each head
+**Priority 2: Bias loading** (POSSIBLE)
+- Line 292: `Bias_ptr_base = Bias + h_idx * stride_bh`
+- Line 328: `bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw`
+- **Hypothesis**: Bias might not load correctly for h_idx>0
+- **Impact**: Wrong bias → wrong attention scores → wrong p_norm → zero gradients
+- **Check**: Compare bias values across heads in Test 5
 
-**Priority 3: Attention scores** (Lines 315-340)
-- `p = tl.math.exp2(qk - lse[:, None])` might be wrong for h_idx>0
-- Check if `qk` (attention scores) are computed correctly for all heads
+**Priority 3: Q/K/V data loading**
+- Lines 289-291, 314-317: Q/K/V pointer calculations
+- **Hypothesis**: q, k, v might load incorrectly for h_idx>0
+- **Impact**: Wrong q/k → wrong attention scores → cascading errors
+- **Check**: Compare q_sum, k_sum across heads in Test 5
 
-**Priority 4: Data loading** (Lines 292-297, 303-312)
-- Verify `q`, `k`, `v`, `bias`, `tau` load correctly for all heads
-- Check offset calculations for h_idx>0
+**Priority 4: p_norm computation**
+- Line 338: `p_norm = tl.exp(s - lse[:, None])`
+- **Hypothesis**: Even if all inputs correct, p_norm might compute wrong for h_idx>0
+- **Impact**: Wrong p_norm → wrong mask_relu → zero gradients
+- **Check**: Compare p_norm_mean across heads in Test 5
+
+**Note**: Since tau=0 test still fails, mask_relu being False is a SYMPTOM not the root cause.
+The root cause is earlier in the pipeline (LSE, bias, or data loading).
 
 ## Next Steps
 
-1. ✅ DONE: Run `test_minimal_backward.py` - PASSED for all heads
-2. **CRITICAL - Add debug instrumentation to backward kernel**:
-   - Create `test_backward_debug.py` to add tl.device_print to actual kernel
-   - Check these values for each head (h_idx=0,1,2,3):
-     - `mask_relu.sum()` - How many positions pass ReLU?
-     - `p_term.min(), p_term.max()` - What are the elastic softmax values?
-     - `dbias_val` before atomic_add - Are gradients computed?
-     - `dtau_acc` before atomic_add - Are tau gradients computed?
-3. **Check preprocess kernel**:
-   - Verify `delta` computation works for all heads
-   - Compare `lse` values across heads
-4. **Isolate the specific line**:
-   - Once we know which value is wrong for h_idx>0, trace back to find the bug
+1. ✅ DONE: Run `test_minimal_backward.py` - PASSED
+2. ✅ DONE: Run `test_mask_relu_hypothesis.py` - Ruled out tau as root cause
+3. **🔴 URGENT**: Run `test_kernel_values_debug.py`
+   - This will pinpoint EXACTLY which value differs between heads
+   - Expected to find one of:
+     - LSE values wrong for h_idx>0 (most likely)
+     - Bias values wrong for h_idx>0
+     - Q/K values wrong for h_idx>0
+     - p_norm wrong for h_idx>0
+   - Once we identify which value, we can trace back to the bug
+4. **After Test 5**: Fix the identified issue in the kernel
 
 ## Files Modified
 - `c:\Users\fzkuj\Projects\adasplash\lazy_attention_triton.py` - Main kernel file
