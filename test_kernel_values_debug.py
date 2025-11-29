@@ -22,13 +22,15 @@ def debug_bwd_kernel(
     h_idx = tl.program_id(1)
     b_idx = tl.program_id(2)
 
-    # Only print for first block to reduce output
-    if m_block_idx == 0 and b_idx == 0:
-        tl.device_print("h_idx:", h_idx)
+    # Load tau first (outside if to avoid duplicate loads)
+    tau = tl.load(Tau + h_idx)
 
-        # Load tau
-        tau = tl.load(Tau + h_idx)
-        tl.device_print("tau:", tau)
+    # Only print for first block to reduce output
+    # Use a single print per head by checking offs_m[0] == 0
+    offs_m = m_block_idx * BLOCK_M + tl.arange(0, BLOCK_M)
+
+    if m_block_idx == 0 and b_idx == 0 and offs_m[0] == 0:
+        tl.device_print("=== Head", h_idx, "===")
 
         # Load Q for this head
         offs_m = m_block_idx * BLOCK_M + tl.arange(0, BLOCK_M)
