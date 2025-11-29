@@ -40,10 +40,11 @@ class LazyAttentionLayer(nn.Module):
         num_kv_heads: int | None = None,
         qkv_bias: bool = False,
         qk_norm: bool = False,
-        window_size: int = 512,  # Required for Lazy Attention
+        window_size: int | None = None,  # Sliding window size (optional)
         rope_theta: float | None = 10000.,
         max_position_embeddings: int | None = None,
         layer_idx: int = None,
+        max_bias_length: int = 512,  # Learnable bias maximum length
     ):
         super().__init__()
 
@@ -59,10 +60,11 @@ class LazyAttentionLayer(nn.Module):
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
 
-        self.window_size = window_size
+        self.window_size = window_size  # Sliding window size (optional)
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+        self.max_bias_length = max_bias_length  # Learnable bias maximum length
 
         if lazy_attention_triton is None:
             raise ImportError("Please install AdaSplash via `pip install adasplash` first")
@@ -79,8 +81,8 @@ class LazyAttentionLayer(nn.Module):
         self.rotary = RotaryEmbedding(dim=self.head_dim, base=self.rope_theta)
 
         # === Lazy Attention specific parameters ===
-        # Learnable head-wise attention biases [H, window_size]
-        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.window_size))
+        # Learnable head-wise attention biases [H, max_bias_length]
+        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.max_bias_length))
         # Learnable sparsity parameter [H]
         self.tau = nn.Parameter(torch.full((self.num_heads,), -1.0))
 
@@ -160,7 +162,7 @@ class LazyAttentionLayer(nn.Module):
             q, k, v,
             bias=self.bias,
             tau=self.tau,
-            window_size=self.window_size,
+            window_size=self.max_bias_length,
             varlen=varlen
         )
 
@@ -183,7 +185,7 @@ if __name__ == "__main__":
     layer = LazyAttentionLayer(
         hidden_size=512,
         num_heads=8,
-        window_size=512,
+        max_bias_length=512,
         rope_theta=10000
     ).cuda()
 

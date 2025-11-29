@@ -58,27 +58,20 @@ class SWAttention(nn.Module):
             num_kv_heads: Optional[int] = None,
             qkv_bias: bool = False,
             qk_norm: bool = False,
-            window_size: Optional[int] = 512,  # ========== 关键修改 2: window_size 必须指定 ==========
+            window_size: Optional[int] = None,  # 滑动窗口大小（可选）
             rope_theta: Optional[float] = 10000.,
             max_position_embeddings: Optional[int] = None,
             layer_idx: int = None,
-            use_learnable_bias: bool = True,  # 兼容原始接口，但 Lazy Attention 总是使用可学习 bias
-            max_bias_length: int = 1024,      # 兼容原始接口，但 Lazy Attention 使用 window_size
+            use_learnable_bias: bool = True,  # 兼容原始接口，Lazy Attention 总是使用可学习 bias
+            max_bias_length: int = 512,       # ========== 关键修改 2: 可学习bias的最大长度 ==========
     ):
         super().__init__()
 
         if not HAS_LAZY_ATTENTION:
             raise ImportError("Please install AdaSplash via `pip install adasplash` first")
 
-        # ========== 兼容处理：如果 window_size 为 None，使用 max_bias_length ==========
-        if window_size is None:
-            window_size = max_bias_length
-            logger.warning(
-                f"window_size was not specified, using max_bias_length={max_bias_length} as window_size for Lazy Attention"
-            )
-
-        # Note: use_learnable_bias and max_bias_length are kept for compatibility with original interface
-        # but are not used in Lazy Attention (which always uses learnable bias with window_size)
+        # Note: use_learnable_bias is kept for compatibility with original interface
+        # Lazy Attention always uses learnable bias with max_bias_length
 
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -92,10 +85,11 @@ class SWAttention(nn.Module):
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
 
-        self.window_size = window_size
+        self.window_size = window_size  # 滑动窗口大小（可选）
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+        self.max_bias_length = max_bias_length  # 可学习bias的最大长度
 
         self.q_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=self.qkv_bias)
         self.k_proj = nn.Linear(self.hidden_size, self.kv_dim, bias=self.qkv_bias)
@@ -107,8 +101,8 @@ class SWAttention(nn.Module):
             self.k_norm = RMSNorm(self.head_dim)
 
         # ========== 关键修改 3: Lazy Attention 的可学习参数 ==========
-        # 每个 head 的位置 bias: [num_heads, window_size]
-        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.window_size))
+        # 每个 head 的位置 bias: [num_heads, max_bias_length]
+        self.bias = nn.Parameter(torch.zeros(self.num_heads, self.max_bias_length))
 
         # 每个 head 的稀疏性参数: [num_heads]
         self.tau = nn.Parameter(torch.full((self.num_heads,), -1.0))
@@ -182,7 +176,7 @@ class SWAttention(nn.Module):
             q, k, v,
             bias=self.bias,
             tau=self.tau,
-            window_size=self.window_size,
+            window_size=self.max_bias_length,
             varlen=varlen
         )
 
