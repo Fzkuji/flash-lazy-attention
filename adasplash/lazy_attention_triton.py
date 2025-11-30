@@ -43,12 +43,21 @@ def _get_lse_kernel_batch(
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 0.0, dtype=tl.float32)
     
-    # Loop bounds
+    # Loop bounds with window clipping optimization
+    # Only need to process j in range [max(0, i - W + 1), i] instead of [0, i]
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
-        
-    for n_start in range(0, n_end, BLOCK_N):
+
+    # Window clipping: skip blocks where all positions are outside the window
+    # For row i, valid columns are [max(0, i-W+1), i]
+    # For this M-block, the minimum row is m_block_idx * BLOCK_M
+    # So the earliest valid column is max(0, m_block_idx * BLOCK_M - window_size + 1)
+    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
+    # Align to BLOCK_N boundary (round down)
+    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
+
+    for n_start in range(n_start_clipped, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
         
         # Load K
@@ -127,34 +136,39 @@ def _lazy_fwd_kernel_batch(
     
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     
+    # Window clipping optimization for forward output kernel
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
-        
-    for n_start in range(0, n_end, BLOCK_N):
+
+    # Window clipping: skip blocks outside the window
+    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
+    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
+
+    for n_start in range(n_start_clipped, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
-        
+
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
         k = tl.load(K_ptr, mask=offs_n[None, :] < seq_len, other=0.0)
-        
+
         sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
         s = tl.dot(q, k) * sm_scale
-        
+
         dist = offs_m[:, None] - offs_n[None, :]
         in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
         dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
-        
+
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
         bias_val = tl.load(bias_ptrs, mask=valid_mask, other=0.0)
         bias_val = tl.where(in_window, bias_val, 0.0)
         s += bias_val
         s = tl.where(dist >= 0, s, float("-inf"))
-        
+
         if IS_VARLEN:
             s = tl.where(offs_n[None, :] < seq_len, s, float("-inf"))
-        
+
         p_norm = tl.exp(s - lse[:, None])
         idx_i = offs_m + 1
         idx_i_float = idx_i.to(tl.float32)
@@ -216,27 +230,32 @@ def _lazy_bwd_preprocess_kernel(
     
     delta = tl.zeros([BLOCK_M], dtype=tl.float32)
 
+    # Window clipping optimization for preprocess kernel
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
-    for n_start in range(0, n_end, BLOCK_N):
+    # Window clipping: skip blocks outside the window
+    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
+    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
+
+    for n_start in range(n_start_clipped, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
-        
+
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
         V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
         k = tl.load(K_ptr, mask=offs_n[None, :] < seq_len, other=0.0)
         v = tl.load(V_ptr, mask=offs_n[:, None] < seq_len, other=0.0)
-        
+
         sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
         s = tl.dot(q, k) * sm_scale
-        
+
         dist = offs_m[:, None] - offs_n[None, :]
         in_window = (dist >= 0) & (dist < window_size)
         valid_mask = (dist >= 0)
         dist_clamped = tl.minimum(dist, window_size - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
-        
+
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
         bias_val = tl.load(bias_ptrs, mask=valid_mask, other=0.0)
         bias_val = tl.where(in_window, bias_val, 0.0)
@@ -326,13 +345,18 @@ def _lazy_bwd_kernel_dq(
     dq = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     dtau_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
 
+    # Window clipping optimization for dQ kernel
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
+    # Window clipping: skip blocks outside the window
+    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
+    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
+
     sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
 
-    for n_start in range(0, n_end, BLOCK_N):
+    for n_start in range(n_start_clipped, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
@@ -427,11 +451,20 @@ def _lazy_bwd_kernel_dk_dv(
     dk = tl.zeros([BLOCK_N, HEAD_DIM], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, HEAD_DIM], dtype=tl.float32)
 
-    # Start M block where offs_m max >= offs_n min.
+    # Window clipping optimization for dK/dV kernel
+    # For column j, valid rows are [j, min(j + W - 1, L - 1)]
+    # This block handles columns [n_block_idx * BLOCK_N, (n_block_idx + 1) * BLOCK_N)
+    # The minimum valid row is n_block_idx * BLOCK_N (causal: i >= j)
+    # The maximum valid row is (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
     m_start_block = (n_block_idx * BLOCK_N) // BLOCK_M
-    num_m_blocks = tl.cdiv(seq_len, BLOCK_M)
-    
-    for m_block in range(m_start_block, num_m_blocks):
+    # End block: the last M-block that could have valid attention to this N-block
+    # For column j, the maximum valid row is j + window_size - 1
+    # For the maximum column in this block: (n_block_idx + 1) * BLOCK_N - 1
+    # Maximum valid row: (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
+    m_end_row = (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
+    m_end_block = tl.minimum(tl.cdiv(m_end_row + 1, BLOCK_M), tl.cdiv(seq_len, BLOCK_M))
+
+    for m_block in range(m_start_block, m_end_block):
         offs_m = m_block * BLOCK_M + tl.arange(0, BLOCK_M)
 
         Q_ptr = Q + b_idx * stride_qb + h_idx * stride_qh + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
