@@ -248,6 +248,7 @@ def _lazy_bwd_preprocess_kernel(
         idx_i = offs_m + 1
         idx_i_float = idx_i.to(tl.float32)
         tau_term = tau / idx_i_float
+        p_term = p_norm + tau_term[:, None]
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
@@ -343,6 +344,7 @@ def _lazy_bwd_kernel_dq(
         idx_i = offs_m + 1
         idx_i_float = idx_i.to(tl.float32)
         tau_term = tau / idx_i_float
+        p_term = p_norm + tau_term[:, None]
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
@@ -447,6 +449,7 @@ def _lazy_bwd_kernel_dk_dv(
         idx_i = offs_m + 1
         idx_i_float = idx_i.to(tl.float32)
         tau_term = tau / idx_i_float
+        p_term = p_norm + tau_term[:, None]
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
