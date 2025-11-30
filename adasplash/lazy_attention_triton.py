@@ -159,7 +159,10 @@ def _lazy_fwd_kernel_batch(
         idx_i = offs_m + 1
         idx_i_float = idx_i.to(tl.float32)
         tau_term = tau / idx_i_float
-        p_elastic = tl.maximum(p_norm + tau_term[:, None], 0.0)
+        # 用 float32 计算 ReLU 避免 bf16 精度问题（tau=-1.0 时 p_term 接近 0）
+        p_norm_f32 = p_norm.to(tl.float32)
+        p_term_f32 = p_norm_f32 + tau_term[:, None]
+        p_elastic = tl.maximum(p_term_f32, 0.0).to(p_norm.dtype)
 
         V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
         v = tl.load(V_ptr, mask=offs_n[:, None] < seq_len, other=0.0)
