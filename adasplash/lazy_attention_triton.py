@@ -14,7 +14,7 @@ def _get_lse_kernel_batch(
     stride_bh, stride_bw,
     stride_qb, stride_kb, stride_lseb, # Batch strides
     n_heads, seq_len_max,
-    window_size,
+    max_bias_length,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
@@ -43,21 +43,12 @@ def _get_lse_kernel_batch(
     m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     l_i = tl.full([BLOCK_M], 0.0, dtype=tl.float32)
     
-    # Loop bounds with window clipping optimization
-    # Only need to process j in range [max(0, i - W + 1), i] instead of [0, i]
+    # Loop bounds (full causal attention)
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
-    # Window clipping: skip blocks where all positions are outside the window
-    # For row i, valid columns are [max(0, i-W+1), i]
-    # For this M-block, the minimum row is m_block_idx * BLOCK_M
-    # So the earliest valid column is max(0, m_block_idx * BLOCK_M - window_size + 1)
-    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
-    # Align to BLOCK_N boundary (round down)
-    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
-
-    for n_start in range(n_start_clipped, n_end, BLOCK_N):
+    for n_start in range(0, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
         
         # Load K
@@ -68,9 +59,9 @@ def _get_lse_kernel_batch(
         s = tl.dot(q, k) * sm_scale
         
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist < window_size)
+        in_window = (dist >= 0) & (dist < max_bias_length)
 
-        dist_clamped = tl.minimum(dist, window_size - 1)
+        dist_clamped = tl.minimum(dist, max_bias_length - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
         
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -106,7 +97,7 @@ def _lazy_fwd_kernel_batch(
     stride_bh, stride_bw,
     stride_qb, stride_kb, stride_vb, stride_ob, stride_lseb,
     n_heads, seq_len_max,
-    window_size,
+    max_bias_length,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
@@ -136,16 +127,12 @@ def _lazy_fwd_kernel_batch(
     
     acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     
-    # Window clipping optimization for forward output kernel
+    # Loop bounds (full causal attention)
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
-    # Window clipping: skip blocks outside the window
-    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
-    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
-
-    for n_start in range(n_start_clipped, n_end, BLOCK_N):
+    for n_start in range(0, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
@@ -155,9 +142,9 @@ def _lazy_fwd_kernel_batch(
         s = tl.dot(q, k) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist < window_size)
+        in_window = (dist >= 0) & (dist < max_bias_length)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size - 1)
+        dist_clamped = tl.minimum(dist, max_bias_length - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -197,7 +184,7 @@ def _lazy_bwd_preprocess_kernel(
     stride_bh, stride_bw,
     stride_lseb, stride_dob, stride_doh, stride_om, stride_ok,
     stride_qb, stride_kb, stride_vb, stride_deltab,
-    n_heads, seq_len_max, window_size,
+    n_heads, seq_len_max, max_bias_length,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
@@ -230,16 +217,12 @@ def _lazy_bwd_preprocess_kernel(
     
     delta = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    # Window clipping optimization for preprocess kernel
+    # Loop bounds (full causal attention)
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
-    # Window clipping: skip blocks outside the window
-    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
-    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
-
-    for n_start in range(n_start_clipped, n_end, BLOCK_N):
+    for n_start in range(0, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
@@ -251,9 +234,9 @@ def _lazy_bwd_preprocess_kernel(
         s = tl.dot(q, k) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist < window_size)
+        in_window = (dist >= 0) & (dist < max_bias_length)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size - 1)
+        dist_clamped = tl.minimum(dist, max_bias_length - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -296,7 +279,7 @@ def _lazy_bwd_kernel_dq(
     stride_qb, stride_kb, stride_vb, stride_deltab,
     stride_dqb, stride_dqh, stride_dqm, stride_dqk,
     stride_dbias_blk, stride_dbias_w,  # Strides for per-block dbias buffer
-    n_heads, seq_len_max, window_size, num_m_blocks,
+    n_heads, seq_len_max, max_bias_length, num_m_blocks,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
@@ -345,18 +328,14 @@ def _lazy_bwd_kernel_dq(
     dq = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     dtau_acc = tl.zeros([BLOCK_M], dtype=tl.float32)
 
-    # Window clipping optimization for dQ kernel
+    # Loop bounds (full causal attention)
     n_end = (m_block_idx + 1) * BLOCK_M
     if IS_VARLEN:
         n_end = tl.minimum(n_end, seq_len)
 
-    # Window clipping: skip blocks outside the window
-    n_start_clipped = tl.maximum(0, m_block_idx * BLOCK_M - window_size + 1)
-    n_start_clipped = (n_start_clipped // BLOCK_N) * BLOCK_N
-
     sm_scale = 1.0 / tl.sqrt(float(HEAD_DIM))
 
-    for n_start in range(n_start_clipped, n_end, BLOCK_N):
+    for n_start in range(0, n_end, BLOCK_N):
         offs_n = n_start + tl.arange(0, BLOCK_N)
 
         K_ptr = K_ptr_base + offs_n[None, :] * stride_kn + offs_k[:, None] * stride_kk
@@ -367,9 +346,9 @@ def _lazy_bwd_kernel_dq(
         s = tl.dot(q, k) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist < window_size)
+        in_window = (dist >= 0) & (dist < max_bias_length)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size - 1)
+        dist_clamped = tl.minimum(dist, max_bias_length - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -422,7 +401,7 @@ def _lazy_bwd_kernel_dk_dv(
     stride_qb, stride_kb, stride_vb, stride_deltab,
     stride_dkb, stride_dkh, stride_dkn, stride_dkk,
     stride_dvb, stride_dvh, stride_dvn, stride_dvk,
-    n_heads, seq_len_max, window_size,
+    n_heads, seq_len_max, max_bias_length,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
     IS_VARLEN: tl.constexpr
 ):
@@ -451,20 +430,13 @@ def _lazy_bwd_kernel_dk_dv(
     dk = tl.zeros([BLOCK_N, HEAD_DIM], dtype=tl.float32)
     dv = tl.zeros([BLOCK_N, HEAD_DIM], dtype=tl.float32)
 
-    # Window clipping optimization for dK/dV kernel
-    # For column j, valid rows are [j, min(j + W - 1, L - 1)]
+    # Loop bounds (full causal attention)
+    # For column j, valid rows are [j, seq_len-1] due to causal mask (i >= j)
     # This block handles columns [n_block_idx * BLOCK_N, (n_block_idx + 1) * BLOCK_N)
-    # The minimum valid row is n_block_idx * BLOCK_N (causal: i >= j)
-    # The maximum valid row is (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
     m_start_block = (n_block_idx * BLOCK_N) // BLOCK_M
-    # End block: the last M-block that could have valid attention to this N-block
-    # For column j, the maximum valid row is j + window_size - 1
-    # For the maximum column in this block: (n_block_idx + 1) * BLOCK_N - 1
-    # Maximum valid row: (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
-    m_end_row = (n_block_idx + 1) * BLOCK_N - 1 + window_size - 1
-    m_end_block = tl.minimum(tl.cdiv(m_end_row + 1, BLOCK_M), tl.cdiv(seq_len, BLOCK_M))
+    num_m_blocks = tl.cdiv(seq_len, BLOCK_M)
 
-    for m_block in range(m_start_block, m_end_block):
+    for m_block in range(m_start_block, num_m_blocks):
         offs_m = m_block * BLOCK_M + tl.arange(0, BLOCK_M)
 
         Q_ptr = Q + b_idx * stride_qb + h_idx * stride_qh + offs_m[:, None] * stride_qm + offs_k[None, :] * stride_qk
@@ -482,9 +454,9 @@ def _lazy_bwd_kernel_dk_dv(
         s = tl.dot(q, tl.trans(k)) * sm_scale
 
         dist = offs_m[:, None] - offs_n[None, :]
-        in_window = (dist >= 0) & (dist < window_size)
+        in_window = (dist >= 0) & (dist < max_bias_length)
         valid_mask = (dist >= 0)
-        dist_clamped = tl.minimum(dist, window_size - 1)
+        dist_clamped = tl.minimum(dist, max_bias_length - 1)
         dist_clamped = tl.maximum(dist_clamped, 0)
 
         bias_ptrs = Bias_ptr_base + dist_clamped * stride_bw
@@ -521,24 +493,24 @@ def _lazy_bwd_kernel_dk_dv(
 # Python Wrapper
 # ==========================================
 
-def lazy_attention_triton(q, k, v, bias, tau, window_size=None, varlen=None):
-    # Auto-infer window_size from bias shape if not provided
-    if window_size is None:
-        window_size = bias.shape[1]
-    return LazyAttentionTritonFunc.apply(q, k, v, bias, tau, window_size, varlen)
+def lazy_attention_triton(q, k, v, bias, tau, max_bias_length=None, varlen=None):
+    # Auto-infer max_bias_length from bias shape if not provided
+    if max_bias_length is None:
+        max_bias_length = bias.shape[1]
+    return LazyAttentionTritonFunc.apply(q, k, v, bias, tau, max_bias_length, varlen)
 
 class LazyAttentionTritonFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, bias, tau, window_size, varlen=None):
-        out, lse = _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen)
+    def forward(ctx, q, k, v, bias, tau, max_bias_length, varlen=None):
+        out, lse = _lazy_attention_forward_return_lse(q, k, v, bias, tau, max_bias_length, varlen)
         ctx.save_for_backward(q, k, v, bias, tau, lse, varlen)
-        ctx.window_size = window_size
+        ctx.max_bias_length = max_bias_length
         return out
         
     @staticmethod
     def backward(ctx, do):
         q, k, v, bias, tau, lse, varlen = ctx.saved_tensors
-        window_size = ctx.window_size
+        max_bias_length = ctx.max_bias_length
         
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
@@ -547,11 +519,11 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
         dbias = torch.zeros_like(bias, dtype=torch.float32)
         dtau = torch.zeros_like(tau, dtype=torch.float32)
         
-        _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
+        _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, max_bias_length, varlen)
         
         return dq, dk, dv, dbias, dtau, None, None
 
-def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=None):
+def _lazy_attention_forward_return_lse(q, k, v, bias, tau, max_bias_length, varlen=None):
     B, H, L, D = q.shape
     BLOCK_M = 64
     BLOCK_N = 64
@@ -573,7 +545,7 @@ def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=N
         k.stride(1), k.stride(2), k.stride(3),
         bias.stride(0), bias.stride(1),
         q.stride(0), k.stride(0), lse.stride(0),
-        H, L, window_size,
+        H, L, max_bias_length,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
         IS_VARLEN=IS_VARLEN
     )
@@ -586,14 +558,14 @@ def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=N
         out.stride(1), out.stride(2), out.stride(3),
         bias.stride(0), bias.stride(1),
         q.stride(0), k.stride(0), v.stride(0), out.stride(0), lse.stride(0),
-        H, L, window_size,
+        H, L, max_bias_length,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
         IS_VARLEN=IS_VARLEN
     )
     
     return out, lse
 
-def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen=None):
+def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, max_bias_length, varlen=None):
     """
     Optimized backward pass using per-block buffers for dBias/dTau.
 
@@ -612,7 +584,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
     grid_m = (num_m_blocks, H, B)
 
     # Allocate per-block buffers (eliminates atomic contention)
-    dbias_blocks = torch.zeros((total_blocks, window_size), device=q.device, dtype=torch.float32)
+    dbias_blocks = torch.zeros((total_blocks, max_bias_length), device=q.device, dtype=torch.float32)
     dtau_blocks = torch.zeros((total_blocks,), device=q.device, dtype=torch.float32)
 
     # Handle varlen
@@ -630,7 +602,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         bias.stride(0), bias.stride(1),
         lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
-        H, L, window_size,
+        H, L, max_bias_length,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
         IS_VARLEN=IS_VARLEN
     )
@@ -646,13 +618,13 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
         dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
         dbias_blocks.stride(0), dbias_blocks.stride(1),
-        H, L, window_size, num_m_blocks,
+        H, L, max_bias_length, num_m_blocks,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
         IS_VARLEN=IS_VARLEN
     )
 
     # Reduce per-block buffers to final gradients (fast PyTorch operations)
-    dbias_blocks = dbias_blocks.view(B, H, num_m_blocks, window_size)
+    dbias_blocks = dbias_blocks.view(B, H, num_m_blocks, max_bias_length)
     dbias.copy_(dbias_blocks.sum(dim=(0, 2)))  # [H, W]
 
     dtau_blocks = dtau_blocks.view(B, H, num_m_blocks)
@@ -671,7 +643,7 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
         dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
         dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-        H, L, window_size,
+        H, L, max_bias_length,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
         IS_VARLEN=IS_VARLEN
     )
