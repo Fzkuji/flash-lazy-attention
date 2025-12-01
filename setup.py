@@ -1,15 +1,15 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
-    name="adasplash",
-    version="0.1.1b",
-    author="Nuno Gonçalves, Marcos Treviso",
-    author_email="marcosvtreviso@gmail.com",
-    description="AdaSplash: Efficient Adaptive Sparse Attention in Triton",
+    name="flash-lazy-attention",
+    version="0.1.0",
+    author="Fzkuji",
+    author_email="fzkuji@gmail.com",
+    description="Flash Lazy Attention: Triton implementation of SWAT/Lazy Attention",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/deep-spin/adasplash",
-    packages=find_packages(),
+    url="https://github.com/Fzkuji/flash-lazy-attention",
+    py_modules=["lazy_attention_triton"],
     install_requires=[
         "numpy",
         "torch",
@@ -21,7 +21,6 @@ setup(
             "black",
             "isort",
             "flake8",
-            "entmax"
         ]
     },
     classifiers=[
