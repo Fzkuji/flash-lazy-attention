@@ -514,8 +514,6 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
         ctx.window_size = window_size
         return out
         
-    _backward_call_count = 0  # Class variable to track calls
-
     @staticmethod
     def backward(ctx, do):
         q, k, v, bias, tau, lse, varlen = ctx.saved_tensors
@@ -524,14 +522,6 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
         # Check which inputs need gradients
         needs_dbias = ctx.needs_input_grad[3]  # bias is 4th input (index 3)
         needs_dtau = ctx.needs_input_grad[4]   # tau is 5th input (index 4)
-
-        # Debug: print which path we're taking (only first 5 calls to avoid spam)
-        LazyAttentionTritonFunc._backward_call_count += 1
-        if LazyAttentionTritonFunc._backward_call_count <= 5:
-            print(f"[LazyAttention BWD #{LazyAttentionTritonFunc._backward_call_count}] "
-                  f"needs_dbias={needs_dbias}, needs_dtau={needs_dtau} -> "
-                  f"{'SLOW path (atomic_add)' if (needs_dbias or needs_dtau) else 'FAST path (no atomic)'}",
-                  flush=True)
 
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
