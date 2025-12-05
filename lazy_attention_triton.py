@@ -163,6 +163,9 @@ def _lazy_fwd_kernel_batch(
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
         p_elastic = tl.maximum(p_term_f32, 0.0).to(p_norm.dtype)
+        # Re-apply causal mask: when tau > 0, upper triangle would have tau/i > 0
+        # This prevents information leakage from future tokens
+        p_elastic = tl.where(valid_mask, p_elastic, 0.0)
 
         V_ptr = V_ptr_base + offs_n[:, None] * stride_vn + offs_k[None, :] * stride_vk
         v = tl.load(V_ptr, mask=offs_n[:, None] < seq_len, other=0.0)
@@ -255,7 +258,8 @@ def _lazy_bwd_preprocess_kernel(
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
-        mask_relu = p_term_f32 > 0
+        # mask_relu also needs causal mask: when tau > 0, upper triangle would pass p_term > 0
+        mask_relu = (p_term_f32 > 0) & valid_mask
 
         dp_elastic = tl.dot(do, tl.trans(v))
 
@@ -279,7 +283,8 @@ def _lazy_bwd_kernel_dq(
     stride_dbias_blk, stride_dbias_w,  # Strides for per-block dbias buffer
     n_heads, seq_len_max, window_size, num_m_blocks,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, HEAD_DIM: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
+    COMPUTE_LAZY_GRAD: tl.constexpr = True  # Skip dbias/dtau when False (frozen params)
 ):
     """
     Optimized dQ kernel with per-block dBias/dTau buffers.
@@ -365,25 +370,29 @@ def _lazy_bwd_kernel_dq(
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
-        mask_relu = p_term_f32 > 0
+        # mask_relu also needs causal mask: when tau > 0, upper triangle would pass p_term > 0
+        mask_relu = (p_term_f32 > 0) & valid_mask
 
         dp_elastic = tl.dot(do, tl.trans(v))
         ds = p_norm * (tl.where(mask_relu, dp_elastic, 0.0) - delta[:, None])
 
         dq += tl.dot(ds.to(k.dtype), tl.trans(k)) * sm_scale
 
-        # dBias - write to per-block buffer (no cross-block atomic contention!)
-        dbias_ptrs = DBias_block_ptr + dist_clamped * stride_dbias_w
-        dbias_val = tl.where(in_window, ds, 0.0)
-        tl.atomic_add(dbias_ptrs, dbias_val, mask=valid_mask)
+        # dBias/dTau - skip when frozen (COMPUTE_LAZY_GRAD=False)
+        if COMPUTE_LAZY_GRAD:
+            # dBias - write to per-block buffer (no cross-block atomic contention!)
+            dbias_ptrs = DBias_block_ptr + dist_clamped * stride_dbias_w
+            dbias_val = tl.where(in_window, ds, 0.0)
+            tl.atomic_add(dbias_ptrs, dbias_val, mask=valid_mask)
 
-        # dTau
-        term_tau = dp_elastic * (1.0 / idx_i_float[:, None])
-        term_tau = tl.where(mask_relu, term_tau, 0.0)
-        dtau_acc += tl.sum(term_tau, 1)
+            # dTau
+            term_tau = dp_elastic * (1.0 / idx_i_float[:, None])
+            term_tau = tl.where(mask_relu, term_tau, 0.0)
+            dtau_acc += tl.sum(term_tau, 1)
 
-    # Store dTau for this block (will be reduced later)
-    tl.store(DTau_block_ptr, tl.sum(dtau_acc))
+    # Store results
+    if COMPUTE_LAZY_GRAD:
+        tl.store(DTau_block_ptr, tl.sum(dtau_acc))
     tl.store(DQ_ptr, dq.to(DQ.dtype.element_ty), mask=offs_m[:, None] < seq_len)
 
 @triton.jit
@@ -472,9 +481,12 @@ def _lazy_bwd_kernel_dk_dv(
         # 用 float32 计算 mask_relu 避免 bf16 精度问题
         p_norm_f32 = p_norm.to(tl.float32)
         p_term_f32 = p_norm_f32 + tau_term[:, None]
-        mask_relu = p_term_f32 > 0
+        # mask_relu also needs causal mask: when tau > 0, upper triangle would pass p_term > 0
+        mask_relu = (p_term_f32 > 0) & valid_mask
 
         p_elastic = tl.maximum(p_term, 0.0)
+        # Re-apply causal mask: when tau > 0, upper triangle would have tau/i > 0
+        p_elastic = tl.where(valid_mask, p_elastic, 0.0)
         dv += tl.dot(tl.trans(p_elastic.to(do.dtype)), do)
 
         dp_elastic = tl.dot(do, tl.trans(v))
@@ -502,20 +514,40 @@ class LazyAttentionTritonFunc(torch.autograd.Function):
         ctx.window_size = window_size
         return out
         
+    _backward_call_count = 0  # Class variable to track calls
+
     @staticmethod
     def backward(ctx, do):
         q, k, v, bias, tau, lse, varlen = ctx.saved_tensors
         window_size = ctx.window_size
-        
+
+        # Check which inputs need gradients
+        needs_dbias = ctx.needs_input_grad[3]  # bias is 4th input (index 3)
+        needs_dtau = ctx.needs_input_grad[4]   # tau is 5th input (index 4)
+
+        # Debug: print which path we're taking (only first 5 calls to avoid spam)
+        LazyAttentionTritonFunc._backward_call_count += 1
+        if LazyAttentionTritonFunc._backward_call_count <= 5:
+            print(f"[LazyAttention BWD #{LazyAttentionTritonFunc._backward_call_count}] "
+                  f"needs_dbias={needs_dbias}, needs_dtau={needs_dtau} -> "
+                  f"{'SLOW path (atomic_add)' if (needs_dbias or needs_dtau) else 'FAST path (no atomic)'}",
+                  flush=True)
+
         dq = torch.zeros_like(q)
         dk = torch.zeros_like(k)
         dv = torch.zeros_like(v)
-        # Force float32 for gradient accumulation of bias and tau
-        dbias = torch.zeros_like(bias, dtype=torch.float32)
-        dtau = torch.zeros_like(tau, dtype=torch.float32)
-        
-        _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
-        
+
+        # Only compute dbias/dtau if needed (skip atomic_add overhead when frozen)
+        if needs_dbias or needs_dtau:
+            dbias = torch.zeros_like(bias, dtype=torch.float32)
+            dtau = torch.zeros_like(tau, dtype=torch.float32)
+            _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dtau, window_size, varlen)
+        else:
+            # Fast path: skip dbias/dtau computation entirely (no atomic_add!)
+            dbias = None
+            dtau = None
+            _lazy_attention_backward_fast(do, q, k, v, bias, tau, lse, dq, dk, dv, window_size, varlen)
+
         return dq, dk, dv, dbias, dtau, None, None
 
 def _lazy_attention_forward_return_lse(q, k, v, bias, tau, window_size, varlen=None):
@@ -615,7 +647,8 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
         dbias_blocks.stride(0), dbias_blocks.stride(1),
         H, L, window_size, num_m_blocks,
         BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
-        IS_VARLEN=IS_VARLEN
+        IS_VARLEN=IS_VARLEN,
+        COMPUTE_LAZY_GRAD=True
     )
 
     # Reduce per-block buffers to final gradients (fast PyTorch operations)
@@ -624,6 +657,84 @@ def _lazy_attention_backward(do, q, k, v, bias, tau, lse, dq, dk, dv, dbias, dta
 
     dtau_blocks = dtau_blocks.view(B, H, num_m_blocks)
     dtau.copy_(dtau_blocks.sum(dim=(0, 2)))  # [H]
+
+    grid_n = (triton.cdiv(L, BLOCK_N), H, B)
+
+    _lazy_bwd_kernel_dk_dv[grid_n](
+        q, k, v, bias, tau, lse, do, delta, varlen_ptr,
+        dk, dv,
+        q.stride(1), q.stride(2), q.stride(3),
+        k.stride(1), k.stride(2), k.stride(3),
+        v.stride(1), v.stride(2), v.stride(3),
+        bias.stride(0), bias.stride(1),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+        q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
+        dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+        dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+        H, L, window_size,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
+        IS_VARLEN=IS_VARLEN
+    )
+
+
+def _lazy_attention_backward_fast(do, q, k, v, bias, tau, lse, dq, dk, dv, window_size, varlen=None):
+    """
+    Fast backward pass that skips dbias/dtau computation.
+
+    Used when bias/tau are frozen (requires_grad=False).
+    Saves memory allocation and atomic_add overhead.
+    """
+    B, H, L, D = q.shape
+    BLOCK_M = 64
+    BLOCK_N = 64
+
+    num_m_blocks = triton.cdiv(L, BLOCK_M)
+
+    delta = torch.empty_like(lse)
+    grid_m = (num_m_blocks, H, B)
+
+    # Dummy buffers (not used when COMPUTE_LAZY_GRAD=False)
+    dbias_dummy = torch.empty((1, 1), device=q.device, dtype=torch.float32)
+    dtau_dummy = torch.empty((1,), device=q.device, dtype=torch.float32)
+
+    # Handle varlen
+    IS_VARLEN = varlen is not None
+    if not IS_VARLEN:
+        varlen_ptr = q  # dummy
+    else:
+        varlen_ptr = varlen
+
+    _lazy_bwd_preprocess_kernel[grid_m](
+        q, k, v, bias, tau, lse, do, delta, varlen_ptr,
+        q.stride(1), q.stride(2), q.stride(3),
+        k.stride(1), k.stride(2), k.stride(3),
+        v.stride(1), v.stride(2), v.stride(3),
+        bias.stride(0), bias.stride(1),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+        q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
+        H, L, window_size,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
+        IS_VARLEN=IS_VARLEN
+    )
+
+    _lazy_bwd_kernel_dq[grid_m](
+        q, k, v, bias, tau, lse, do, delta, varlen_ptr,
+        dq, dbias_dummy, dtau_dummy,
+        q.stride(1), q.stride(2), q.stride(3),
+        k.stride(1), k.stride(2), k.stride(3),
+        v.stride(1), v.stride(2), v.stride(3),
+        bias.stride(0), bias.stride(1),
+        lse.stride(0), do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+        q.stride(0), k.stride(0), v.stride(0), delta.stride(0),
+        dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
+        dbias_dummy.stride(0), 1,  # dummy strides
+        H, L, window_size, num_m_blocks,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, HEAD_DIM=D,
+        IS_VARLEN=IS_VARLEN,
+        COMPUTE_LAZY_GRAD=False  # Skip dbias/dtau computation!
+    )
+
+    # No reduction needed - dbias/dtau are not computed
 
     grid_n = (triton.cdiv(L, BLOCK_N), H, B)
 
